@@ -1,47 +1,55 @@
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, Chat, GenerateContentResponse } from "@google/genai";
+import { Message, Role, SYSTEM_PROMPT } from "../types";
 
-export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    return res.status(405).send("Only POST allowed");
-  }
+let chatSession: Chat | null = null;
 
-  const apiKey = process.env.GEMINI_API_KEY;
+const getAiClient = (): GoogleGenAI => {
+  const apiKey = process.env.API_KEY;
   if (!apiKey) {
-    return res.status(500).send("Missing GEMINI_API_KEY");
+    throw new Error("API Key not found");
   }
+  return new GoogleGenAI({ apiKey });
+};
 
-  const { message, history = [] } = req.body;
+export const initializeChat = () => {
+  try {
+    const ai = getAiClient();
+    chatSession = ai.chats.create({
+      model: "gemini-3-flash-preview",
+      config: {
+        systemInstruction: SYSTEM_PROMPT,
+        temperature: 0.4,
+      }
+    });
+  } catch (error) {
+    console.error("Failed to initialize chat:", error);
+  }
+};
 
-  const ai = new GoogleGenAI({ apiKey });
-
-  const chat = ai.chats.create({
-    model: "gemini-1.5-flash",
-    config: {
-      temperature: 0.4,
-      systemInstruction:
-        "Bạn là trợ lý AI hỗ trợ tạo giáo án rõ ràng, súc tích.",
-    },
-    history: history.map((m) => ({
-      role: m.role,
-      parts: [{ text: m.content }],
-    })),
-  });
-
-  res.setHeader("Content-Type", "text/plain; charset=utf-8");
-  res.setHeader("Transfer-Encoding", "chunked");
+export const sendMessageStream = async function* (
+  message: string,
+  history: Message[],
+  imagePart?: { inlineData: { data: string; mimeType: string } }
+) {
+  if (!chatSession) {
+    initializeChat();
+  }
+  if (!chatSession) {
+    throw new Error("Chat session not initialized");
+  }
 
   try {
-    const stream = await chat.sendMessageStream({ message });
-
-    for await (const chunk of stream) {
-      if (chunk.text) {
-        res.write(chunk.text);
+    const msg = imagePart ? [message, imagePart] : message;
+    const result = await chatSession.sendMessageStream({ message: msg });
+    
+    for await (const chunk of result) {
+      const c = chunk as GenerateContentResponse;
+      if (c.text) {
+        yield c.text;
       }
     }
-
-    res.end();
-  } catch (err) {
-    res.write("\n\n[STREAM ERROR]");
-    res.end();
+  } catch (error) {
+    console.error("Error in sendMessageStream:", error);
+    throw error;
   }
-}
+};
