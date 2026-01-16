@@ -1,91 +1,65 @@
-import { GoogleGenAI, Chat, GenerateContentResponse } from "@google/genai";
-import { Message, Role, SYSTEM_PROMPT } from "../types";
+import { GoogleGenAI } from "@google/genai";
 
-let chatSession: Chat | null = null;
-
-const getAiClient = (): GoogleGenAI => {
-  const apiKey = process.env.API_KEY;
-  if (!apiKey) {
-    throw new Error("API Key not found");
-  }
-  return new GoogleGenAI({ apiKey });
+export const config = {
+  runtime: "edge", // ⚡ streaming nhanh hơn node
 };
 
-export const initializeChat = () => {
-  try {
-    const ai = getAiClient();
-    chatSession = ai.chats.create({
-      model: "gemini-3-flash-preview",
-      config: {
-        systemInstruction: SYSTEM_PROMPT,
-        temperature: 0.4,
-      }
-    });
-  } catch (error) {
-    console.error("Failed to initialize chat:", error);
-  }
-};
-
-export const sendMessageStream = async function* (
-  message: string,
-  history: Message[],
-  imagePart?: { inlineData: { data: string; mimeType: string } }
-) {
-  if (!chatSession) {
-    initializeChat();
-  }
-  if (!chatSession) {
-    throw new Error("Chat session not initialized");
-  }
-
-  try {
-    const msg = imagePart ? [message, imagePart] : message;
-    const result = await chatSession.sendMessageStream({ message: msg });
-    
-    for await (const chunk of result) {
-      const c = chunk as GenerateContentResponse;
-      if (c.text) {
-        yield c.text;
-      }
-    }
-  } catch (error) {
-    console.error("Error in sendMessageStream:", error);
-    throw error;
-  }
-};
-import type { VercelRequest, VercelResponse } from "@vercel/node";
-
-export default async function handler(
-  req: VercelRequest,
-  res: VercelResponse
-) {
+export default async function handler(req) {
   if (req.method !== "POST") {
-    return res.status(405).json({ error: "Only POST allowed" });
+    return new Response("Only POST allowed", { status: 405 });
   }
 
-  const { prompt } = req.body;
-
-  if (!prompt) {
-    return res.status(400).json({ error: "Prompt is required" });
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    return new Response("Missing GEMINI_API_KEY", { status: 500 });
   }
 
-  try {
-    const response = await fetch(
-      "https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent?key=" +
-        process.env.GEMINI_API_KEY,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }]
-        })
+  const { message, history = [] } = await req.json();
+
+  const ai = new GoogleGenAI({ apiKey });
+
+  const chat = ai.chats.create({
+    model: "gemini-1.5-flash", // ✅ ổn định + có free quota
+    config: {
+      temperature: 0.4,
+      systemInstruction:
+        "Bạn là trợ lý AI hỗ trợ tạo giáo án rõ ràng, súc tích.",
+    },
+    history: history.map((m) => ({
+      role: m.role,
+      parts: [{ text: m.content }],
+    })),
+  });
+
+  const stream = new ReadableStream({
+    async start(controller) {
+      try {
+        const result = await chat.sendMessageStream({
+          message,
+        });
+
+        for await (const chunk of result) {
+          if (chunk.text) {
+            controller.enqueue(
+              new TextEncoder().encode(chunk.text)
+            );
+          }
+        }
+
+        controller.close();
+      } catch (err) {
+        controller.enqueue(
+          new TextEncoder().encode("\n\n[STREAM ERROR]")
+        );
+        controller.close();
       }
-    );
+    },
+  });
 
-    const data = await response.json();
-    return res.status(200).json(data);
-
-  } catch {
-    return res.status(500).json({ error: "Gemini API failed" });
-  }
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/plain; charset=utf-8",
+      "Cache-Control": "no-cache",
+    },
+  });
 }
