@@ -1,25 +1,21 @@
 import { GoogleGenAI } from "@google/genai";
 
-export const config = {
-  runtime: "edge", // ⚡ streaming nhanh hơn node
-};
-
-export default async function handler(req) {
+export default async function handler(req, res) {
   if (req.method !== "POST") {
-    return new Response("Only POST allowed", { status: 405 });
+    return res.status(405).send("Only POST allowed");
   }
 
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
-    return new Response("Missing GEMINI_API_KEY", { status: 500 });
+    return res.status(500).send("Missing GEMINI_API_KEY");
   }
 
-  const { message, history = [] } = await req.json();
+  const { message, history = [] } = req.body;
 
   const ai = new GoogleGenAI({ apiKey });
 
   const chat = ai.chats.create({
-    model: "gemini-1.5-flash", // ✅ ổn định + có free quota
+    model: "gemini-1.5-flash",
     config: {
       temperature: 0.4,
       systemInstruction:
@@ -31,35 +27,21 @@ export default async function handler(req) {
     })),
   });
 
-  const stream = new ReadableStream({
-    async start(controller) {
-      try {
-        const result = await chat.sendMessageStream({
-          message,
-        });
+  res.setHeader("Content-Type", "text/plain; charset=utf-8");
+  res.setHeader("Transfer-Encoding", "chunked");
 
-        for await (const chunk of result) {
-          if (chunk.text) {
-            controller.enqueue(
-              new TextEncoder().encode(chunk.text)
-            );
-          }
-        }
+  try {
+    const stream = await chat.sendMessageStream({ message });
 
-        controller.close();
-      } catch (err) {
-        controller.enqueue(
-          new TextEncoder().encode("\n\n[STREAM ERROR]")
-        );
-        controller.close();
+    for await (const chunk of stream) {
+      if (chunk.text) {
+        res.write(chunk.text);
       }
-    },
-  });
+    }
 
-  return new Response(stream, {
-    headers: {
-      "Content-Type": "text/plain; charset=utf-8",
-      "Cache-Control": "no-cache",
-    },
-  });
+    res.end();
+  } catch (err) {
+    res.write("\n\n[STREAM ERROR]");
+    res.end();
+  }
 }
